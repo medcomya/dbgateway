@@ -13,9 +13,6 @@ module.exports = function(config) {
 	  	}.bind(this));
 	};
 
-//module.exports.get = function(){
-    //console.log(config);
-//}
 
 	return {
 		get : get,
