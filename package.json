@@ -1,0 +1,22 @@
+{
+  "name": "dbgateway",
+  "version": "1.0.0",
+  "description": "Test db gateway ",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/medcomya/dbgateway.git"
+  },
+  "author": "ma",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/medcomya/dbgateway/issues"
+  },
+  "homepage": "https://github.com/medcomya/dbgateway#readme",
+  "dependencies": {
+    "mysql": "^2.12.0"
+  }
+}
