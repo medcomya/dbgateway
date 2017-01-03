@@ -1,3 +1,3 @@
 module.exports = {
-  get : 'SELECT ?? FROM ?? WHERE id = ?'
+  get : 'SELECT ?? FROM ?? WHERE ?? = ?'
 };

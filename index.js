@@ -27,24 +27,65 @@ module.exports = function(config) {
 		config : config
 	};
 
-	function get(options){
-		return new Promise(function(resolve,reject){
+	function get(options, id){
+		return processQuery(function () {
+			var errors;
+			if(!options) {
+				errors = 'Invalid args';
+			} else {
+				if(typeof options === 'function'){
+					options = options();
+				}
+			}
+
+			return {
+				init:init,
+				query: queries.get,
+				params: [options.objectFields, options.table, options.keyFiled, id]
+			};
+
+			function init(){
+				return error;
+			}
 			
+		});
+	}
+
+	function processQuery(queryOptions){
+                   return new Promise(function(resolve, reject){
+
+			if(typeof queryOptions === 'function'){
+				queryOptions = queryOptions();
+			}
+
+			var error = queryOptions.init && queryOptions.init();
+			if(error){
+				reject(err);
+				return;	
+			}
 			pool.getConnection(function(err, connection) {
 				if (err) {
 					reject(err);
+					connection.release();
 					return;
 				}
-				// Use the connection
-				connection.query( queries.get, function(err, rows) {
-					if (err) {
+                                var queryFunction = function(err, result) {
+                                        if (err) {
 						reject(err);
+						connection.release();
 						return;
 					}
-					// And done with the connection.
+					if(queryOptions.processResult) {
+	                                        result = queryOptions.processResult(result, reject);
+					}
 					connection.release();
 					resolve(rows);
-				});
+				}
+				if(queryOptions.params) {
+					connection.query(queryOptions.query, queryOptions.params, queryFunction);
+				} else {
+                                 	connection.query(queryOptions.query, queryFunction);
+				}
 			});
 		});
 	}
