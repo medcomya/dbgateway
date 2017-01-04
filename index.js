@@ -25,7 +25,7 @@ module.exports = function (config) {
     }
 
     function expressionArg(val, prefix, postfix){
-        var expression = '?? ' + val + '?';
+        var expression = '?? ' + val + ' ?';
         return function(arg){
             if(prefix){
                 arg = prefix + arg;
