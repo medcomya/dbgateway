@@ -81,29 +81,32 @@ module.exports = function (config) {
         return options;
     }
 
+    function processWhere(where) {
+        var aWhere = [];
+        var operation = 0;
+        for (var key in where) {
+            if (where.hasOwnProperty(key)) {
+                if (key === 'operation') {
+                    operation = where[key];
+                } else {
+                    aWhere.push(where[key](key));
+                }
+            }
+        }
+
+        return aWhere.join(operation ? ' or ' : ' and ');
+    }
+
     function processOptions(options){
         options = options || {
             limit: 10
         };
 
-        var operation = 0;
+
         var where;
 
         if(options.where){
-            var aWhere = [];
-            for(var key in options.where){
-                if(options.where.hasOwnProperty(key)) {
-                    if(key === 'operation') {
-                        operation = options.where[key];
-                    } else {
-                        aWhere.push(options.where[key](key));
-                    }
-                    //console.log("obj." + prop + " = " + obj[prop]);
-                }
-            }
-
-            where = aWhere.join(operation ? ' or ': ' and ');
-
+            where = processWhere(options.where);
         }
 
         if(!where){
