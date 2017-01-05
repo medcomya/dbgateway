@@ -5,17 +5,6 @@ module.exports = function (config) {
 
     config = config || {};
     config.connectionLimit = config.connectionLimit || 10;
-    //
-    //config.queryFormat = function (query, values) {
-    //  	if (!values) return query;
-    //  	return query.replace(/(\?)?\?(\w+)/g, function (match, mark, key) {
-    //    		if (values.hasOwnProperty(key)) {
-    //    		        var value = values[key];
-    //      			return mark ? this.escapeId(value) : this.escape(value);
-    //    		}
-    //    		return match;
-    //  	}.bind(this));
-    //};
 
     var pool = mysql.createPool(config);
 
@@ -64,8 +53,6 @@ module.exports = function (config) {
         expressions: expressions
     };
 
-
-
     function init(options) {
 
         if (!options) {
@@ -86,14 +73,18 @@ module.exports = function (config) {
         var operation = 0;
         for (var key in where) {
             if (where.hasOwnProperty(key)) {
-                if (key === 'operation') {
+                if (key === '$group') {
+                    var group = processWhere(where[key]);
+                    if(group){
+                        aWhere.push('(' + group + ')');
+                    }
+                } else if (key === '$operation') {
                     operation = where[key];
                 } else {
                     aWhere.push(where[key](key));
                 }
             }
         }
-
         return aWhere.join(operation ? ' or ' : ' and ');
     }
 
