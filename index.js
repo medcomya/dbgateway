@@ -1,5 +1,6 @@
 var mysql = require('mysql');
 var queries = require('./queries');
+var endOfLine = require('os').EOL;
 
 module.exports = function (config) {
 
@@ -48,7 +49,10 @@ module.exports = function (config) {
     return {
         get: get,
         getList: getList,
+        insert: insert,
+        update: update,
         close: close,
+        createSchema: createSchema,
         config: config,
         expressions: expressions
     };
@@ -88,46 +92,251 @@ module.exports = function (config) {
         return aWhere.join(operation ? ' or ' : ' and ');
     }
 
+    function processOrderBy(orderBy){
+        var orders = [];
+        for (var key in orderBy){
+            if (orderBy.hasOwnProperty(key)) {
+                var order = orderBy[key];
+                orders.push(key + ' ' + (order === 1 || order === 'desc' ? ' DESC' : ''));
+            }
+        }
+
+        return ' ORDER BY ' + orders.join(', ');
+    }
+
     function processOptions(options){
         options = options || {
             limit: 10
         };
 
-
         var where;
-
         if(options.where){
             where = processWhere(options.where);
         }
 
-        if(!where){
-            where = '1=1';
+        var ops = {
+            options : options,
+            where : where ? ' WHERE ' + where : ''
+        };
+
+        if(options.orderBy){
+            ops.orderBy = processOrderBy(options.orderBy);
+        }
+        if(options.limit){
+            ops.limit = ' LIMIT ' + options.limit;
+        }
+        if(options.offset){
+            ops.offset = ' OFFSET ' + options.offset;
         }
 
-
-        return {
-            options : options,
-            where : where
-        };
+        return ops;
     }
 
     function getList(type, options) {
-        return processQuery(function () {
+        var promise = processQuery(function () {
             type = init(type);
             var ops = processOptions(options);
-            type.query = queries.getList + ops.where + ' limit 10';
-            type.params = [type.listFields, type.table];
+            type.eventMode = !!options.processRow;
+            type.query = queries.getList + ops.where + ops.orderBy + ops.limit + ops.offset;
+            type.params = [options.fields ? options.fields : type.listFields, type.table];
             return type;
         });
+
+        if(options.processRow){
+            promise = promise.then(function(queryParams){
+                var connection = queryParams.connection;
+                connection.resume();
+                queryParams.query.on('result', function(row) {
+                    connection.pause();
+                    options.processRow(row);
+                    connection.resume();
+                }).on('end', function() {
+                    connection.release();
+                });
+            });
+        }
+        return promise;
     }
 
     function get(type, id) {
         return processQuery(function () {
             type = init(type);
             type.query = queries.get;
-            type.params = [type.objectFields, type.table, type.keyFiled, id];
+            type.params = [type.objectFields, type.table, type.primaryFiled, id];
             return type;
         });
+    }
+
+    function insert(type, obj){
+        return processQuery(function () {
+            type = init(type);
+            type.query = queries.insert;
+            type.params = [type.table, obj];
+            return type;
+        });
+    }
+
+    function update(type, obj, options){
+        return processQuery(function () {
+            type = init(type);
+            var ops;
+            if(typeof options === 'number'){
+                ops = {
+                    where : mysql.format(' WHERE ?? = ?', [type.primaryFiled, options])
+                };
+            } else {
+                ops = processOptions(options);
+            }
+            type.query = queries.update + ops.where;
+            type.params = [type.table, obj];
+            return type;
+        });
+    }
+
+    function createSchema() {
+        return processQuery(function () {
+            return {
+                query: queries.showTables
+            };
+        }).then(function(result){
+            var fieldName = result.fields[0].name;
+            var tables = result.results.map(function(obj){
+                return obj[fieldName];
+            });
+            var query = tables.map(function(table){
+                return mysql.format(queries.showTableDetails, [table, table]);//'SHOW COLUMNS FROM `' + table[fieldName] + '`';
+            }).join(';');
+            return processQuery(function () {
+                return {
+                    query: query
+                };
+            }).then(function(result){
+                result.tables = tables;
+                return result;
+            });
+        }).then(function(result){
+            var classes = [];
+            var tables = [];
+            result.tables.forEach(function(table, idx){
+
+                var className = capitalize(manyToOne(table));
+                tables.push(className);
+
+                var columns = result.results[2 * idx];
+                var dbKeys = result.results[2 * idx + 1];
+
+                var listFields = columns.filter(function(column){
+                    return column.Key;
+                }).map(function(column){
+                    return column.Field;
+                });
+
+                var objectFields = columns.map(function(column){
+                    return column.Field;
+                });
+
+                var keys = {};
+                var properties = {};
+                columns.forEach(function(column){
+
+                    properties[column.Field] = {
+                        _type : column.Type,
+                        _null : column.Null
+                    };
+                    if(column.Default !== null){
+                        properties[column.Field]._default = column.Default;
+                    }
+                    if(column.Extra){
+                        properties[column.Field]._extra = column.Extra;
+                    }
+                    if(column.Key){
+                        var filteredKeys = dbKeys.filter(function(key){ return key.Column_name === column.Field;});
+                        filteredKeys.forEach(function(key){
+                            if(keys[key.Key_name]){
+                                var k = keys[key.Key_name];
+                                k.fields.push({
+                                    name: key.Column_name,
+                                    seq: key.Seq_in_index
+                                });
+                            } else {
+                                keys[key.Key_name] = {
+                                    fields : [{
+                                        name: key.Column_name,
+                                        seq: key.Seq_in_index
+                                    }],
+                                    unique: !key.Non_unique
+                                };
+                            }
+                        });
+
+                        properties[column.Field]._key = filteredKeys[0].Key_name;
+                    }
+                });
+
+                for (var key in keys){
+                    if (keys.hasOwnProperty(key)) {
+                        if(keys[key].fields.length > 1){
+                            keys[key].fields = keys[key].fields.sort(function(f1, f2){
+                                return f1.seq - f2.seq;
+                            });
+                        }
+                        keys[key].fields = keys[key].fields.map(function(field){
+                            return field.name;
+                        });
+                    }
+                }
+
+                var cl = 'function ' +className + '(){' + endOfLine +
+                '\tthis.table = \'' + table + '\';' + endOfLine +
+                '\tthis.primaryFiled = \'Id\';' + endOfLine +
+                '\tthis.keys = ' + makeProperties(keys) + //JSON.stringify(keys).replace(/"/gi,'\'') + ';' + endOfLine +
+                '\tthis.listFields = ' + JSON.stringify(listFields).replace(/"/gi,'\'') + ';' + endOfLine +
+                '\tthis.objectFields = ' + JSON.stringify(objectFields).replace(/"/gi,'\'') + ';' + endOfLine +
+                '\tthis.properties = ' + makeProperties(properties) +
+                '}';
+                classes.push(cl);
+            });
+
+            var sClasses = classes.join(endOfLine + endOfLine);
+            if(process.argv.some(function (val) {
+                return val === 'module';
+            })){
+                return 'module.exports = {' + endOfLine + tables.map(function(table){
+                        return '\t' + table + ' : ' + table;
+                    }).join(',' + endOfLine) + endOfLine + '};' + endOfLine + endOfLine + sClasses;
+            }
+            return sClasses;
+        });
+    }
+
+    function makeProperties(properties){
+        return (JSON.
+            stringify(properties).
+            replace(/"/gi,'\'').
+            replace(/},'/gi,'},' + endOfLine + '\t\t\'').
+            replace('{','{' + endOfLine + '\t\t') + ';' + endOfLine).replace('}};','}' + endOfLine + '\t};');
+    }
+
+    function manyToOne(string) {
+        var lastPos = string.length - 1;
+        if(string.charAt(lastPos) !== 's'){
+            return string;
+        }
+        if(string.charAt(lastPos - 1) === 'e' && string.charAt(lastPos - 2) === 'i'){
+            return string.slice(0, lastPos-2) + 'y';
+        }
+        if(string.charAt(lastPos - 1) === 'e' && string.charAt(lastPos - 2) === 'o'){
+            return string.slice(0, lastPos-1);
+        }
+        if(string.charAt(lastPos - 1) === 'e' && string.charAt(lastPos - 2) === 'v'){
+            var part = string.slice(0, lastPos-2);
+            return part.length < 3 ? part + 'fe' : part + 'f';
+        }
+        return string.slice(0, lastPos);
+    }
+
+    function capitalize(string) {
+        return string.charAt(0).toUpperCase() + string.slice(1);
     }
 
     function processQuery(queryOptions) {
@@ -145,25 +354,32 @@ module.exports = function (config) {
             pool.getConnection(function (err, connection) {
                 if (err) {
                     reject(err);
-                    connection.release();
                     return;
                 }
-                var queryFunction = function (err, result) {
+                var queryFunction = !queryOptions.eventMode ? function (err, results, fields) {
                     if (err) {
                         reject(err);
                         connection.release();
                         return;
                     }
+                    var result = { results:results, fields:fields};
                     if (queryOptions.processResult) {
                         result = queryOptions.processResult(result, reject);
                     }
                     connection.release();
                     resolve(result);
-                };
-                if (queryOptions.params) {
-                    connection.query(queryOptions.query, queryOptions.params, queryFunction);
-                } else {
+                } : undefined;
+
+                var query = queryOptions.params ?
+                    connection.query(queryOptions.query, queryOptions.params, queryFunction) :
                     connection.query(queryOptions.query, queryFunction);
+
+                if(queryOptions.eventMode){
+                    connection.pause();
+                    resolve({
+                        query : query,
+                        connection : connection
+                    });
                 }
             });
         });
