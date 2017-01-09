@@ -9,14 +9,106 @@ module.exports = function (config) {
 
     var pool = mysql.createPool(config);
 
+    var expressions = {
+        equal: expressionArg('='),
+        equalField: expressionField('='),
+        notEqual: expressionArg('<>'),
+        above: expressionArg('>'),
+        aboveAndEqual: expressionArg('>='),
+        below: expressionArg('<'),
+        belowAndEqual: expressionArg('<='),
+
+        startWith: expressionArg('LIKE', '', '%'),
+        endWith: expressionArg('LIKE', '%'),
+        contains: expressionArg('LIKE', '%', '%'),
+
+        and: 0,
+        or: 1
+    };
+
+    var contract = {
+        query: query,
+        get: get,
+        insert: insert,
+        update: update,
+        createRepository: createRepository,
+        close: close,
+        createSchema: createSchema,
+        config: config,
+        expressions: expressions,
+        order: orderFunc(),
+        orderDesc: orderFunc(1)
+    };
+    contract['delete'] = _delete;
+    return contract;
+
+    function createRepository(type){
+        type = init(type);
+        var repository = {
+            get     : function(options){return get(type, options);},
+            insert  : function(obj){return insert(type, obj);},
+            update  : function(obj, options){return update(type, obj, options);},
+            query   : function(){return query(type);},
+            type    : type,
+            expressions : expressions,
+            order       : orderFunc(),
+            orderDesc   : orderFunc(1)
+        };
+        repository['delete'] = function(options){return _delete(type, options);};
+        return repository;
+    }
+
+    function query(type){
+        type = init(type);
+        var options = {orderBy : {}, joins: []};
+        var queryContract = {
+            get     : function(){return get(type, options);},
+            update  : function(obj){return update(type, obj, options);},
+            where   : function(obj){options.where = obj; return queryContract;},
+            join    : addJoin,
+            limit   : function(l, o){
+                options.limit = l;
+                if(o){
+                    options.offset = o;
+                }
+                return queryContract;
+            },
+            offset    : function(o){options.offset = o; return queryContract;},
+            orderBy   : function(field, table){options.orderBy[field] = orderFunc()(table); return queryContract;},
+            orderByDesc  : function(field, table){options.orderBy[field] = orderFunc(1)(table); return queryContract;},
+            processRow   : function(pr){options.processRow = pr; return queryContract;}
+        };
+        queryContract['delete'] = function(options){return _delete(type, options);};
+        return queryContract;
+
+        function addJoin(typeOrJoinParams, joinType, on, alias, fields){
+            if(typeof typeOrJoinParams ===  'function' || (
+                typeof typeOrJoinParams === 'object' &&
+                typeOrJoinParams.table && typeOrJoinParams.keys && typeOrJoinParams.properties
+                )){
+                options.joins.push({
+                    joinType : joinType,
+                    type : typeOrJoinParams,
+                    fields : fields,
+                    on : on,
+                    as : alias
+                })
+            } else if(typeof typeOrJoinParams === 'object'){
+                options.push(typeOrJoinParams);
+            }
+            return queryContract;
+        }
+    }
+
+
+
     function close() {
-        pool.end(function (err) {
-        });
+        pool.end(function (err) { });
     }
 
     function expressionArg(val, prefix, postfix){
         var expression = '?? ' + val + ' ?';
-        return function(arg){
+        return function(arg, table){
             if(prefix){
                 arg = prefix + arg;
             }
@@ -24,147 +116,199 @@ module.exports = function (config) {
                 arg = arg + postfix;
             }
 
-            return function(key){
+            return function(key, mainTable){
+                if(mainTable){
+                    return (table ? table : mainTable) + '.' + key + ' ' + val + ' ' + mysql.escape(arg);
+                }
                 return mysql.format(expression, [key, arg]);
             }
         };
     }
 
-    var expressions = {
-        equal: expressionArg('='),
-        notEqual: expressionArg('<>'),
-        above: expressionArg('>'),
-        aboveAndEqual: expressionArg('>='),
-        below: expressionArg('<'),
-        belowAndEqual: expressionArg('<='),
+    function expressionField(val){
+        var expression = '?? ' + val + ' ??';
+        return function(arg, table){
 
-        startWith: expressionArg('like', '', '%'),
-        endWith: expressionArg('like', '%'),
-        contains: expressionArg('like', '%', '%'),
-
-        and: 0,
-        or: 1
-    };
-
-    return {
-        get: get,
-        getList: getList,
-        insert: insert,
-        update: update,
-        close: close,
-        createSchema: createSchema,
-        config: config,
-        expressions: expressions
-    };
-
-    function init(options) {
-
-        if (!options) {
-            return {
-                error : 'Invalid args'
-            };
-        }
-
-        if (typeof options === 'function') {
-            return new options();
-        }
-
-        return options;
+            return function(key, mainTable){
+                if(mainTable){
+                    return mainTable + '.' + key + ' ' + val + ' ' + (table ? table : mainTable) + '.' + arg;
+                }
+                return mysql.format(expression, [key, arg]);
+            }
+        };
     }
 
-    function processWhere(where) {
+    function init(type) {
+        if (!type) {
+            return {error : 'Invalid args'};
+        }
+        if (typeof type === 'function') {
+            return new type();
+        }
+        return type;
+    }
+
+    function processWhere(where, table) {
         var aWhere = [];
         var operation = 0;
         for (var key in where) {
             if (where.hasOwnProperty(key)) {
                 if (key === '$group') {
-                    var group = processWhere(where[key]);
+                    var group = processWhere(where[key], table);
                     if(group){
                         aWhere.push('(' + group + ')');
                     }
                 } else if (key === '$operation') {
                     operation = where[key];
                 } else {
-                    aWhere.push(where[key](key));
+                    aWhere.push(where[key](key, table));
                 }
             }
         }
-        return aWhere.join(operation ? ' or ' : ' and ');
+        return aWhere.join(operation ? ' OR ' : ' AND ');
     }
 
-    function processOrderBy(orderBy){
+    function orderFunc(isDesc){
+        return function(table){
+            return {desc : isDesc, table : table};
+        };
+    }
+
+    function makeField(key, mainTable, table){
+        table = table || mainTable;
+        return mysql.format('??', [mainTable ? table + '.' + key : key]);
+    }
+
+    function makeDirection(isString, direction){
+        if(isString){
+            return direction ? ' ' + direction : '';
+        }
+        return (direction === 1 ? ' DESC' : '');
+    }
+
+    function processOrderBy(orderBy, mainTable){
         var orders = [];
         for (var key in orderBy){
             if (orderBy.hasOwnProperty(key)) {
                 var order = orderBy[key];
-                orders.push(key + ' ' + (order === 1 || order === 'desc' ? ' DESC' : ''));
+                var type = typeof order;
+                var field = makeField(key, mainTable, type === 'object' ? order.table : undefined);
+                orders.push(field + makeDirection(type === 'string', order.desc || order));
             }
         }
-
-        return ' ORDER BY ' + orders.join(', ');
+        if(orders.length === 0){
+            return '';
+        }
+        return ' ORDER BY ' + orders.join(', ') + endOfLine;
     }
 
-    function processOptions(options){
-        options = options || {
-            limit: 10
-        };
+    function prepareFields(type, ops, isJoin){
+        var table = ops.as ? ops.as : type.table;
+        var fields = ops.fields;
+        return (fields ? fields : type.listFields).map(function(field){
+            return mysql.format('??.?? AS ??', [table, field, isJoin ? table + '_' + field : field]);
+        });
+    }
 
+    function processOptions(options, type, flds){
+        options = options || {
+            limit: 100
+        };
+        var joins = options.joins || [];
         var where;
-        if(options.where){
-            where = processWhere(options.where);
+        var mainTable = joins.length > 0 ? type.table : undefined;
+        if (options.where){
+            where = processWhere(options.where, mainTable);
         }
 
         var ops = {
             options : options,
-            where : where ? ' WHERE ' + where : ''
+            where : where ? ' WHERE ' + where + endOfLine : '',
+            joins : '',
+            orderBy : '',
+            limit: '',
+            offset: ''
         };
 
-        if(options.orderBy){
-            ops.orderBy = processOrderBy(options.orderBy);
+        if (joins.length > 0){
+            var sJoins = [];
+            ops.fields = flds || prepareFields(type, options);
+            joins.forEach(function(join){
+                join.as = join.as || join.alias;
+                var type = init(join.type);
+                if(!type.error){
+                    join.fields = flds || join.fields || [];
+                    ops.fields = ops.fields.concat(prepareFields(type, join, 1));
+                    var table = join.as ? type.table + ' AS ' + join.as : type.table;
+                    sJoins.push(' ' + join.joinType +' JOIN ' + table +  ' ON '+ processWhere(join.on, join.as ? join.as : type.table))
+                }
+            });
+            if(sJoins.length > 0){
+                ops.joins = sJoins.join(endOfLine) + endOfLine;
+            }
+        } else {
+            ops.fields = flds || (options.fields ? options.fields : type.listFields);
         }
-        if(options.limit){
-            ops.limit = ' LIMIT ' + options.limit;
+        ops.fields = flds || ops.fields.join(', ');
+        if (options.orderBy){
+            ops.orderBy = processOrderBy(options.orderBy, mainTable);
         }
-        if(options.offset){
-            ops.offset = ' OFFSET ' + options.offset;
+        if (options.limit){
+            ops.limit = ' LIMIT ' + options.limit + endOfLine;
         }
-
+        if (options.offset){
+            ops.offset = ' OFFSET ' + options.offset + endOfLine ;
+        }
         return ops;
     }
 
     function getList(type, options) {
         var promise = processQuery(function () {
             type = init(type);
-            var ops = processOptions(options);
+            var ops = processOptions(options, type);
             type.eventMode = !!options.processRow;
-            type.query = queries.getList + ops.where + ops.orderBy + ops.limit + ops.offset;
-            type.params = [options.fields ? options.fields : type.listFields, type.table];
+            type.query = ' SELECT ' + ops.fields + ' FROM ' + type.table + ops.joins +
+            ops.where + ops.orderBy + ops.limit + ops.offset;
+            console.log(type.query);
             return type;
         });
 
         if(options.processRow){
             promise = promise.then(function(queryParams){
-                var connection = queryParams.connection;
-                connection.resume();
-                queryParams.query.on('result', function(row) {
-                    connection.pause();
-                    options.processRow(row);
+                return new Promise(function(resolve, reject){
+                    var connection = queryParams.connection;
                     connection.resume();
-                }).on('end', function() {
-                    connection.release();
+                    queryParams.query.on('result', function(row) {
+                        connection.pause();
+                        options.processRow(row);
+                        connection.resume();
+                    }).on('end', function() {
+                        connection.release();
+                        resolve();
+                    }).on('error', function(err) {
+                        reject(err);
+                    });
                 });
             });
         }
         return promise;
     }
 
-    function get(type, id) {
+    function getObject(type, id) {
         return processQuery(function () {
             type = init(type);
             type.query = queries.get;
             type.params = [type.objectFields, type.table, type.primaryFiled, id];
             return type;
         });
+    }
+
+    function get(type, options) {
+        if(typeof options === 'number'){
+            return getObject(type, options);
+        } else {
+            return getList(type, options);
+        }
     }
 
     function insert(type, obj){
@@ -181,14 +325,27 @@ module.exports = function (config) {
             type = init(type);
             var ops;
             if(typeof options === 'number'){
-                ops = {
-                    where : mysql.format(' WHERE ?? = ?', [type.primaryFiled, options])
-                };
+                ops = {where : mysql.format(' WHERE ?? = ?', [type.primaryFiled, options])};
             } else {
-                ops = processOptions(options);
+                ops = processOptions(options, type, 1);
             }
             type.query = queries.update + ops.where;
             type.params = [type.table, obj];
+            return type;
+        });
+    }
+
+    function _delete(type, options){
+        return processQuery(function () {
+            type = init(type);
+            var ops;
+            if(typeof options === 'number'){
+                ops = {where : mysql.format(' WHERE ?? = ?', [type.primaryFiled, options])};
+            } else {
+                ops = processOptions(options, type, 1);
+            }
+            type.query = queries._delete + ops.where;
+            type.params = [type.table];
             return type;
         });
     }
@@ -373,6 +530,8 @@ module.exports = function (config) {
                 var query = queryOptions.params ?
                     connection.query(queryOptions.query, queryOptions.params, queryFunction) :
                     connection.query(queryOptions.query, queryFunction);
+
+                console.log(query.sql);
 
                 if(queryOptions.eventMode){
                     connection.pause();
